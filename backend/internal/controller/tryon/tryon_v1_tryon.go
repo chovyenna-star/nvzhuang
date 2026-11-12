@@ -7,8 +7,13 @@ package tryon
 import (
 	"context"
 
+	"github.com/gogf/gf/v2/net/ghttp"
+
 	"backend/api/tryon/v1"
+	"backend/internal/imagevalidate"
 	"backend/internal/logic/tryon"
+	"backend/internal/middleware"
+	"backend/internal/security"
 )
 
 type ControllerV1 struct{}
@@ -18,6 +23,39 @@ func NewV1() *ControllerV1 {
 }
 
 func (c *ControllerV1) Tryon(ctx context.Context, req *v1.TryonReq) (res *v1.TryonRes, err error) {
+	r := ghttp.RequestFromCtx(ctx)
+	secService := security.GetService()
+	imgLimits := imagevalidate.LoadImageLimits(ctx)
+
+	// 1. 严格校验两张图片（人像和服装）真实格式、文件大小、尺寸及像素
+	personImg, garmentImg, imgErr := imagevalidate.ValidateImagesPair(req.PersonImage, req.GarmentImage, imgLimits)
+	if imgErr != nil {
+		if apiErr, ok := imgErr.(*security.APIError); ok {
+			middleware.WriteAPIError(r, apiErr)
+			return nil, nil
+		}
+		middleware.WriteAPIError(r, security.ErrInvalidImageBase64)
+		return nil, nil
+	}
+
+	// 2. 检查并原子扣减每日调用额度
+	principalID := r.GetCtxVar(middleware.CtxPrincipalID).String()
+	if principalID == "" {
+		principalID = "anonymous"
+	}
+	if !secService.DailyQuotaTracker.CheckAndDeduct(principalID) {
+		middleware.WriteAPIError(r, security.ErrDailyQuotaExceeded)
+		return nil, nil
+	}
+
+	// 3. 并发控制（单 Token 并发与全局并发）
+	release, ok := secService.ConcurrencyManager.Acquire(principalID)
+	if !ok {
+		middleware.WriteAPIError(r, security.ErrConcurrencyLimited)
+		return nil, nil
+	}
+	defer release()
+
 	var clientConfig *tryon.ModelConfig
 	if req.ClientConfig != nil {
 		clientConfig = &tryon.ModelConfig{
@@ -29,10 +67,10 @@ func (c *ControllerV1) Tryon(ctx context.Context, req *v1.TryonReq) (res *v1.Try
 		}
 	}
 
-	imageB64, model, prompt, err := tryon.DoTryonWithClientConfig(
+	imageB64, model, prompt, err := tryon.DoTryonWithValidatedImages(
 		ctx,
-		req.PersonImage,
-		req.GarmentImage,
+		personImg,
+		garmentImg,
 		req.Model,
 		req.Size,
 		req.Lang,
@@ -41,9 +79,29 @@ func (c *ControllerV1) Tryon(ctx context.Context, req *v1.TryonReq) (res *v1.Try
 	if err != nil {
 		return nil, err
 	}
+	imageMIME, err := tryon.DetectGeneratedImageMIME(imageB64)
+	if err != nil {
+		return nil, err
+	}
 	return &v1.TryonRes{
 		Image:  imageB64,
+		MIME:   imageMIME,
 		Model:  model,
 		Prompt: prompt,
+	}, nil
+}
+
+func (c *ControllerV1) ComfyUIHealth(ctx context.Context, req *v1.ComfyUIHealthReq) (res *v1.ComfyUIHealthRes, err error) {
+	model, healthErr := tryon.CheckComfyUI(ctx)
+	if healthErr != nil {
+		return &v1.ComfyUIHealthRes{
+			Available: false,
+			Message:   "本地 ComfyUI 或固定工作流不可用",
+		}, nil
+	}
+	return &v1.ComfyUIHealthRes{
+		Available: true,
+		Model:     model,
+		Message:   "本地 ComfyUI 固定工作流可用",
 	}, nil
 }
