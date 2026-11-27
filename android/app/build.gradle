@@ -1,0 +1,74 @@
+plugins {
+    id 'com.android.application'
+}
+
+def releaseKeystoreFile = file("release.jks")
+def releaseSigningValues = [
+    storePassword: System.getenv("KEYSTORE_PASSWORD"),
+    keyAlias: System.getenv("KEY_ALIAS"),
+    keyPassword: System.getenv("KEY_PASSWORD"),
+]
+def hasReleaseSigning = releaseKeystoreFile.exists() && releaseSigningValues.values().every { it != null && !it.trim().isEmpty() }
+
+gradle.taskGraph.whenReady { graph ->
+    def releaseTaskRequested = graph.allTasks.any { it.name.toLowerCase().contains("release") }
+    if (releaseTaskRequested && !hasReleaseSigning) {
+        throw new GradleException("Release builds require android/app/release.jks and KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD.")
+    }
+}
+
+android {
+    namespace 'com.paipiange.nvzhuang'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.paipiange.nvzhuang"
+        minSdk 24
+        targetSdk 34
+        versionCode 100
+        versionName "1.0.0"
+
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            release {
+                storeFile releaseKeystoreFile
+                storePassword releaseSigningValues.storePassword
+                keyAlias releaseSigningValues.keyAlias
+                keyPassword releaseSigningValues.keyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix '.debug'
+        }
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.11.0'
+    implementation 'androidx.webkit:webkit:1.11.0'
+    implementation 'androidx.activity:activity:1.8.2'
+    testImplementation 'junit:junit:4.13.2'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}

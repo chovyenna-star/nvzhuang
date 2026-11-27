@@ -28,21 +28,58 @@ type ModelConfig struct {
 	BaseURL  string // 接口地址（可配置，支持第三方/国内服务商）
 	Model    string // 服务商侧真实模型名
 	EnvKey   string // 覆盖用的环境变量名
+	// ComfyUI 固定工作流配置。路径和节点映射只允许来自服务端配置，避免公网后端访问用户指定的内网地址。
+	WorkflowPath   string
+	PersonNode     string
+	GarmentNode    string
+	PromptNode     string
+	SeedNode       string
+	Seed           int64
+	OutputNode     string
+	PollInterval   time.Duration
+	RequestTimeout time.Duration
 	// ClientProvided 表示配置来自浏览器；启用后 HTTP 客户端会阻止内网/保留地址，降低 SSRF 风险。
 	ClientProvided bool
 }
 
 // loadModelConfig 从配置文件加载指定模型的配置，并允许环境变量覆盖
 func loadModelConfig(ctx context.Context, alias string) (*ModelConfig, error) {
+	cfg := loadModelConfigCandidate(ctx, alias)
+	if cfg == nil {
+		return nil, fmt.Errorf("模型 %s 未配置（当前请求可能来自不支持个人模型配置的旧前端或旧后端）", alias)
+	}
+
+	provider := strings.ToLower(strings.TrimSpace(cfg.Provider))
+	if provider != "comfyui" && cfg.APIKey == "" {
+		return nil, fmt.Errorf("模型 %s 未配置 API Key（请在 config.yaml 的 llm.models.%s.apiKey 或环境变量中配置）", alias, alias)
+	}
+	if cfg.Model == "" {
+		return nil, fmt.Errorf("模型 %s 未配置 model 名（llm.models.%s.model）", alias, alias)
+	}
+	return cfg, nil
+}
+
+// loadModelConfigCandidate reads configuration without requiring credentials. It is used by
+// the no-generation provider preflight so missing keys can be reported without exposing them.
+func loadModelConfigCandidate(ctx context.Context, alias string) *ModelConfig {
 	// 按列表读取：llm.models.[alias]
 	prefix := "llm.models." + alias
 	cfg := &ModelConfig{
-		Name:     alias,
-		Provider: g.Cfg().MustGet(ctx, prefix+".provider", "openai").String(),
-		APIKey:   g.Cfg().MustGet(ctx, prefix+".apiKey", "").String(),
-		BaseURL:  g.Cfg().MustGet(ctx, prefix+".baseURL", "").String(),
-		Model:    g.Cfg().MustGet(ctx, prefix+".model", "").String(),
-		EnvKey:   g.Cfg().MustGet(ctx, prefix+".envKey", "").String(),
+		Name:           alias,
+		Provider:       g.Cfg().MustGet(ctx, prefix+".provider", "openai").String(),
+		APIKey:         g.Cfg().MustGet(ctx, prefix+".apiKey", "").String(),
+		BaseURL:        g.Cfg().MustGet(ctx, prefix+".baseURL", "").String(),
+		Model:          g.Cfg().MustGet(ctx, prefix+".model", "").String(),
+		EnvKey:         g.Cfg().MustGet(ctx, prefix+".envKey", "").String(),
+		WorkflowPath:   g.Cfg().MustGet(ctx, prefix+".workflowPath", "").String(),
+		PersonNode:     g.Cfg().MustGet(ctx, prefix+".personNode", "").String(),
+		GarmentNode:    g.Cfg().MustGet(ctx, prefix+".garmentNode", "").String(),
+		PromptNode:     g.Cfg().MustGet(ctx, prefix+".promptNode", "").String(),
+		SeedNode:       g.Cfg().MustGet(ctx, prefix+".seedNode", "").String(),
+		Seed:           g.Cfg().MustGet(ctx, prefix+".seed", 246813579).Int64(),
+		OutputNode:     g.Cfg().MustGet(ctx, prefix+".outputNode", "").String(),
+		PollInterval:   time.Duration(g.Cfg().MustGet(ctx, prefix+".pollIntervalMs", 1000).Int()) * time.Millisecond,
+		RequestTimeout: time.Duration(g.Cfg().MustGet(ctx, prefix+".timeoutSeconds", 900).Int()) * time.Second,
 	}
 
 	// 环境变量覆盖（优先级最高）
@@ -56,17 +93,7 @@ func loadModelConfig(ctx context.Context, alias string) (*ModelConfig, error) {
 	if cfg.Model == "" && cfg.BaseURL == "" && cfg.APIKey == "" {
 		cfg = loadLegacyConfig(ctx, alias)
 	}
-	if cfg == nil {
-		return nil, fmt.Errorf("模型 %s 未配置（当前请求可能来自不支持个人模型配置的旧前端或旧后端）", alias)
-	}
-
-	if cfg.APIKey == "" {
-		return nil, fmt.Errorf("模型 %s 未配置 API Key（请在 config.yaml 的 llm.models.%s.apiKey 或环境变量中配置）", alias, alias)
-	}
-	if cfg.Model == "" {
-		return nil, fmt.Errorf("模型 %s 未配置 model 名（llm.models.%s.model）", alias, alias)
-	}
-	return cfg, nil
+	return cfg
 }
 
 // loadLegacyConfig 兼容旧的 llm.openai / llm.gemini 配置写法
@@ -94,6 +121,13 @@ func loadLegacyConfig(ctx context.Context, alias string) *ModelConfig {
 
 // NewGenerator 根据模型别名创建适配器
 func NewGenerator(ctx context.Context, alias string) (ImageGenerator, error) {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(alias)), "comfyui") {
+		cfg, err := resolveComfyUIConfig(ctx, alias)
+		if err != nil {
+			return nil, err
+		}
+		return newGeneratorFromConfig(cfg)
+	}
 	cfg, err := loadModelConfig(ctx, alias)
 	if err != nil {
 		return nil, err
@@ -176,8 +210,10 @@ func newGeneratorFromConfig(cfg *ModelConfig) (ImageGenerator, error) {
 		return NewOpenAIImages(cfg), nil
 	case "gemini", "google":
 		return NewGemini(cfg), nil
+	case "comfyui":
+		return NewComfyUI(cfg), nil
 	default:
-		return nil, fmt.Errorf("unsupported provider: %s (supported: openai, doubao, gemini)", cfg.Provider)
+		return nil, fmt.Errorf("unsupported provider: %s (supported: openai, doubao, gemini, comfyui)", cfg.Provider)
 	}
 }
 

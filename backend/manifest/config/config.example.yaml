@@ -70,6 +70,11 @@ server:
 #     dumpRouterMap:       true               # 是否在Server启动时打印所有的路由列表。默认为true
 #     graceful:            false              # 是否开启平滑重启特性，开启时将会在本地增加10000的本地TCP端口用于进程间通信。默认false             
 #     gracefulTimeout:     2                  # 父进程在平滑重启后多少秒退出，默认2秒。若请求耗时大于该值，可能会导致请求中断
+
+observability:
+  metricsEnabled: true          # 启用 /metrics 聚合指标，不记录请求体、对话、图片、Token 或 IP
+  allowRemoteMetrics: false     # 默认仅允许本机回环访问；远程 Prometheus 采集时才显式开启
+
 # 日志配置
 logger:
   # path:                  ""                    # 日志文件路径。默认为空，表示关闭，仅输出到终端
@@ -120,6 +125,51 @@ llm:
       baseURL: "https://generativelanguage.googleapis.com/v1beta"
       model: "gemini-3.1-flash-image"
 
+    # 本地 ComfyUI 固定工作流：Qwen-Image-Edit-2511（优先默认）
+    comfyui:
+      provider: comfyui
+      baseURL: "http://127.0.0.1:8188"
+      model: "qwen-image-edit-2511"
+      workflowPath: "workflows/comfyui_qwen_image_edit_2511_api.json"
+      personNode: "7"
+      garmentNode: "8"
+      promptNode: "11"
+      seedNode: "15"
+      seed: 0
+      outputNode: "17"
+      pollIntervalMs: 1000
+      timeoutSeconds: 900
+
+    # 本地 ComfyUI：Qwen 独立配置（优先）
+    comfyui-qwen:
+      provider: comfyui
+      baseURL: "http://127.0.0.1:8188"
+      model: "qwen-image-edit-2511"
+      workflowPath: "workflows/comfyui_qwen_image_edit_2511_api.json"
+      personNode: "7"
+      garmentNode: "8"
+      promptNode: "11"
+      seedNode: "15"
+      seed: 0
+      outputNode: "17"
+      pollIntervalMs: 1000
+      timeoutSeconds: 900
+
+    # 本地 ComfyUI：MiniMax H3 独立配置（兼容保留）
+    comfyui-h3:
+      provider: comfyui
+      baseURL: "http://127.0.0.1:8188"
+      model: "h3-ref2va-still"
+      workflowPath: "workflows/comfyui_h3_ref2va_still_api.json"
+      personNode: "16"
+      garmentNode: "17"
+      promptNode: "6"
+      seedNode: "10"
+      seed: 246813579 # 已验证的稳定种子；设为 -1 时每次随机
+      outputNode: "19"
+      pollIntervalMs: 1000
+      timeoutSeconds: 900
+
     # 以下为可选的国内模型示例（默认注释掉，按需开启）
     # 通义万相（阿里云百炼，OpenAI 兼容）
     # qwen:
@@ -144,6 +194,80 @@ llm:
     #   envKey: "SILICONFLOW_API_KEY"
     #   baseURL: "https://api.siliconflow.cn/v1"
     #   model: "Kwai-Kolors/Kolors"
+
+# 接口安全与访问控制配置
+security:
+  authRequired: true                # 是否强制 Bearer Token 访问鉴权。本地调试可设为 false，线上部署必须为 true
+  apiKeys: []                       # 也可直接配置 Token；真实 config.yaml 已被忽略，禁止写入 config.example.yaml
+  apiKeysEnv: "TRYON_API_KEYS"      # 读取有效后端 Token 的环境变量名（多 Token 以英文逗号分隔，每个 32~512 字符）
+  trustedOrigins:                   # CORS 严格白名单（精确匹配，禁止 *）
+    - "https://paipiange.github.io"
+    - "https://servicewechat.com"
+    - "https://appassets.androidplatform.net"
+    - "http://localhost:3000"
+    - "http://127.0.0.1:3000"
+    - "http://localhost:8080"
+    - "http://127.0.0.1:8080"
+    - "http://localhost:5173"
+    - "http://127.0.0.1:5173"
+    - "http://localhost:9000"
+    - "http://127.0.0.1:9000"
+    - "http://localhost:8000"
+    - "http://127.0.0.1:8000"
+  allowPrivateNetwork: false        # 是否允许来自私有网络的 PNA 预检
+  rateLimit:
+    requestsPerMinute: 10           # 单调用方每分钟请求速率上限
+    burst: 3                        # 允许短时间突发容量
+    limiterIdleMinutes: 30          # 限流器闲置自动清理周期（分钟）
+    dailyRequestsPerPrincipal: 100  # 单调用方每日最高调用成功额度（自然日重置）
+  concurrency:
+    global: 2                       # 全局最大生图并发数
+    perPrincipal: 1                 # 单调用方最大生图并发数
+  costGuard:
+    requireAcknowledgement: true    # 云端生图必须由客户端逐次确认可能产生费用；本地 ComfyUI 不受影响
+    dailyCloudGlobal: 100           # 所有调用方每日云端生图总预算（内存计数，重启后重置）
+    dailyCloudPerPrincipal: 20      # 单调用方每日云端生图预算（内存计数，重启后重置）
+
+# 请求体与图片安全限制
+upload:
+  maxRequestBodyBytes: 25165824     # 整个 HTTP JSON 请求体最大字节数（24 MiB）
+  maxEncodedImageBytes: 12582912    # 单张 Base64 编码字符串最大长度（12 MiB）
+  maxDecodedImageBytes: 8388608     # 单张图片解码后真实文件大小上限（8 MiB）
+  maxCombinedDecodedBytes: 16777216 # 两张图片（人像+服装）解码后合计字节上限（16 MiB）
+  minWidth: 256                     # 图片最小宽度（像素）
+  minHeight: 256                    # 图片最小高度（像素）
+  maxWidth: 8192                    # 图片最大宽度（像素）
+  maxHeight: 8192                   # 图片最大高度（像素）
+  maxPixels: 20000000               # 单图最大像素总量（2000万像素，防内存耗尽）
+  allowedMimeTypes:                 # 允许的真实图片格式
+    - "image/jpeg"
+    - "image/png"
+    - "image/webp"
+
+# 本地语音服务。模型下载脚本默认使用语音包指定目录；可在这里设置项目自己的数据目录。
+voice:
+  root: "D:/ai/ai/nvzhuang"
+  ffmpeg: "ffmpeg"
+  download:
+    huggingFaceToken: ""           # 或在 .env 中设置 HF_TOKEN / HUGGINGFACE_HUB_TOKEN
+    modelScopeToken: ""            # 或在 .env 中设置 MODELSCOPE_API_TOKEN
+  cosyvoice:
+    referenceWav: ""               # 授权参考音频路径；也可设置 COSYVOICE_REFERENCE_WAV
+    referenceText: ""              # 参考音频准确文本；也可设置 COSYVOICE_REFERENCE_TEXT
+    linxiReferenceWav: ""          # 林溪授权参考音频；需与文本同时配置
+    linxiReferenceText: ""
+  seeduplex:
+    apiKey: ""                      # 或在 .env 中设置 SEEDUPLEX_API_KEY
+    voice: "zh_female_vv_jupiter_bigtts"
+    voices:
+      zhixia: "zh_female_vv_jupiter_bigtts"
+      linxi: ""                     # 配置已授权的上游音色名后才开放林溪角色
+  local:
+    voices:
+      zhixia: "local-reference"
+      linxi: ""                     # 配置本机 CosyVoice 已注册音色后才开放林溪角色
+  # 可选 Open-LLM-VTuber；只允许本机回环 ws/wss，环境变量 OPEN_LLM_VTUBER_WS_URL 优先。
+  open_llm_vtuber_ws_url: "ws://127.0.0.1:12393/client-ws"
 
 # 配置数据库
 # database:
